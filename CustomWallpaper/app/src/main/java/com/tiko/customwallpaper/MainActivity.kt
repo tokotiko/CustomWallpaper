@@ -1,6 +1,6 @@
 package com.tiko.customwallpaper
 
-import android.app.Activity
+import androidx.activity.ComponentActivity
 import android.app.WallpaperManager
 import android.content.ComponentName
 import android.content.Intent
@@ -17,7 +17,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
     private lateinit var preview: ImageView
     private var selectedUri: Uri? = null
 
