@@ -1,6 +1,5 @@
 package com.tiko.customwallpaper
 
-import android.service.wallpaper.WallpaperService
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -9,6 +8,7 @@ import android.graphics.Rect
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.service.wallpaper.WallpaperService
 import android.view.SurfaceHolder
 import kotlin.math.max
 import kotlin.math.min
@@ -19,7 +19,9 @@ class ParallaxWallpaperService : WallpaperService() {
     private inner class ParallaxEngine : Engine() {
         private val handler = Handler(Looper.getMainLooper())
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        private var bitmap: Bitmap? = null
+        private var bottom: Bitmap? = null
+        private var middle: Bitmap? = null
+        private var top: Bitmap? = null
         private var xOffset = 0.5f
         private var visible = false
         private var surfaceWidth = 1
@@ -28,20 +30,26 @@ class ParallaxWallpaperService : WallpaperService() {
 
         override fun onCreate(surfaceHolder: SurfaceHolder) {
             super.onCreate(surfaceHolder)
-            loadImage()
+            loadLayers()
             setTouchEventsEnabled(false)
         }
 
-        private fun loadImage() {
-            val uriText = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
-                .getString(MainActivity.KEY_IMAGE_URI, null) ?: return
-            try {
-                bitmap = contentResolver.openInputStream(Uri.parse(uriText))?.use {
-                    BitmapFactory.decodeStream(it)
+        private fun loadLayers() {
+            val prefs = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
+            fun load(key: String): Bitmap? {
+                val text = prefs.getString(key, null) ?: return null
+                return try {
+                    contentResolver.openInputStream(Uri.parse(text))?.use {
+                        BitmapFactory.decodeStream(it)
+                    }
+                } catch (_: Exception) {
+                    null
                 }
-            } catch (_: Exception) {
-                bitmap = null
             }
+            bottom = load(MainActivity.KEY_BOTTOM_URI)
+                ?: load(MainActivity.KEY_IMAGE_URI)
+            middle = load(MainActivity.KEY_MIDDLE_URI)
+            top = load(MainActivity.KEY_TOP_URI)
         }
 
         override fun onVisibilityChanged(visibleNow: Boolean) {
@@ -56,8 +64,14 @@ class ParallaxWallpaperService : WallpaperService() {
             drawFrame()
         }
 
-        override fun onOffsetsChanged(xOffsetNow: Float, yOffset: Float, xOffsetStep: Float,
-                                      yOffsetStep: Float, xPixelOffset: Int, yPixelOffset: Int) {
+        override fun onOffsetsChanged(
+            xOffsetNow: Float,
+            yOffsetNow: Float,
+            xOffsetStep: Float,
+            yOffsetStep: Float,
+            xPixelOffset: Int,
+            yPixelOffset: Int
+        ) {
             xOffset = xOffsetNow.coerceIn(0f, 1f)
             drawFrame()
         }
@@ -65,8 +79,12 @@ class ParallaxWallpaperService : WallpaperService() {
         override fun onDestroy() {
             visible = false
             handler.removeCallbacks(drawRunner)
-            bitmap?.recycle()
-            bitmap = null
+            bottom?.recycle()
+            middle?.recycle()
+            top?.recycle()
+            bottom = null
+            middle = null
+            top = null
             super.onDestroy()
         }
 
@@ -78,28 +96,50 @@ class ParallaxWallpaperService : WallpaperService() {
                 canvas = holder.lockCanvas()
                 if (canvas != null) {
                     canvas.drawColor(0xFF102D25.toInt())
-                    val image = bitmap
-                    if (image != null && !image.isRecycled) {
-                        val scale = max(surfaceWidth.toFloat() / image.width, surfaceHeight.toFloat() / image.height)
-                        val scaledW = image.width * scale
-                        val scaledH = image.height * scale
-                        val extraX = max(0f, scaledW - surfaceWidth)
-                        val extraY = max(0f, scaledH - surfaceHeight)
-                        val shiftX = extraX * xOffset
-                        val srcLeft = (shiftX / scale).toInt().coerceIn(0, max(0, image.width - 1))
-                        val srcTop = (extraY / scale / 2f).toInt().coerceIn(0, max(0, image.height - 1))
-                        val srcWidth = min(image.width - srcLeft, (surfaceWidth / scale).toInt().coerceAtLeast(1))
-                        val srcHeight = min(image.height - srcTop, (surfaceHeight / scale).toInt().coerceAtLeast(1))
-                        canvas.drawBitmap(image, Rect(srcLeft, srcTop, srcLeft + srcWidth, srcTop + srcHeight),
-                            Rect(0, 0, surfaceWidth, surfaceHeight), paint)
-                    }
+                    // Different offset multipliers create a simple three-depth parallax effect.
+                    drawLayer(canvas, bottom, 0.25f)
+                    drawLayer(canvas, middle, 0.60f)
+                    drawLayer(canvas, top, 1.0f)
                 }
             } catch (_: Exception) {
                 // Avoid crashing the launcher if a wallpaper surface becomes unavailable.
             } finally {
-                if (canvas != null) try { holder.unlockCanvasAndPost(canvas) } catch (_: Exception) { }
+                if (canvas != null) {
+                    try {
+                        holder.unlockCanvasAndPost(canvas)
+                    } catch (_: Exception) {
+                    }
+                }
             }
             if (visible) handler.postDelayed(drawRunner, 1000L / 20L)
+        }
+
+        private fun drawLayer(canvas: Canvas, bitmap: Bitmap?, depth: Float) {
+            if (bitmap == null || bitmap.isRecycled) return
+            val scale = max(
+                surfaceWidth.toFloat() / bitmap.width,
+                surfaceHeight.toFloat() / bitmap.height
+            )
+            val scaledWidth = bitmap.width * scale
+            val scaledHeight = bitmap.height * scale
+            val extraX = max(0f, scaledWidth - surfaceWidth)
+            val extraY = max(0f, scaledHeight - surfaceHeight)
+
+            // Move each layer at a different rate as the launcher changes its page offset.
+            val shiftX = extraX * xOffset * depth
+            val shiftY = extraY * 0.5f
+            val srcLeft = (shiftX / scale).toInt().coerceIn(0, max(0, bitmap.width - 1))
+            val srcTop = (shiftY / scale).toInt().coerceIn(0, max(0, bitmap.height - 1))
+            val srcWidth = min(bitmap.width - srcLeft, (surfaceWidth / scale).toInt().coerceAtLeast(1))
+            val srcHeight = min(bitmap.height - srcTop, (surfaceHeight / scale).toInt().coerceAtLeast(1))
+            if (srcWidth > 0 && srcHeight > 0) {
+                canvas.drawBitmap(
+                    bitmap,
+                    Rect(srcLeft, srcTop, srcLeft + srcWidth, srcTop + srcHeight),
+                    Rect(0, 0, surfaceWidth, surfaceHeight),
+                    paint
+                )
+            }
         }
     }
 }
